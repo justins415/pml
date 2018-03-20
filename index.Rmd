@@ -1,0 +1,228 @@
+---
+title: "Course Project - Practical Machine Learning"
+author: "Justin Saeks"
+date: "March 18, 2018"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+## Executive Summary
+
+Devices such as the FitBit, Nike FuelBand, and Jawbone Up have become popular to track personal activity data.  This project's goal is to use a sample of measurements recorded from subjects performing Unilateral Dumbbell Biceps Curls classified as correctly or incorrectly done --  19,622 observations each with 160 variables -- to build a predictive model.  The model's accuracy will be checked by predicting correct/incorrect lifting in test data (a testing group carved out from the training group for model validation, and a separate test data file from Coursera used for grading).
+
+The data comes from accelerometers placed on the forearm, arm, belt, and barbell of six participants who each performed 50 curls.  The provided data classifies the lifts into five groups - A, B, C, D, and E - which relate to the lifts' correctness.  The "A" lifts were correctly done, while the other four represent common mistakes -- throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D), and throwing the hips to the front (Class E).
+
+```{r z1, echo=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(cache = TRUE, echo=FALSE)
+set.seed(25)
+library(caret)
+library(e1071)
+library(forecast)
+library(gridExtra)
+library(klaR)
+library(randomForest)
+```
+
+## Data Loading and Pre-processing
+
+The training data is loaded from the supplied 'pml-training.csv' file, with the empty fields, NA, and "#DIV/0!" all considered as NA for possible removal.
+
+```{r z2, echo=FALSE}
+trainingFile <- read.csv("pml-training.csv", na.strings = c("NA","",'#DIV/0!'), stringsAsFactors = FALSE)
+## colSums(is.na(trainingFile))
+```
+
+## Exploratory Data Analysis & Data Transformation
+
+Looking at the NA content with "colSums(is.na())" reveals dozens of columns that contain almost entirely NA and only a few data points.  These mostly-empty columns are removed.
+
+Next it may be useful to check the timing and amount of data collected from subjects, to see whether there are major differences that need further scrutiny.
+
+```{r z2a, echo=TRUE, eval=TRUE}
+theme_set(theme_bw(base_size = 12))
+a <- qplot(classe, cvtd_timestamp, data=trainingFile, color=user_name, size=I(3)) + scale_color_brewer(palette="Accent")
+grid.arrange(a, ncol=1)
+```
+
+There don't seem to be obvious problems in data collection.  But this possibility of differences between subjects also relates to the other variables, so it may be revisited if the models are inaccurate.  If they perform badly, there is the possibility that transformations could be needed for different subjects, days, or the like.
+
+With 300 total curls performed by the subjects, and about 20,000 rows of data, it appears that the measurements are time series.  However, this will be overlooked for now, to see if the models still work well.
+
+Based on these assumptions, the first several columns containing names and dates etc. are removed.  Along with NA's, this results in a quick trimming down from 160 variables to 53 variables.
+
+```{r z3, echo = TRUE}
+trainingDataSet <- trainingFile[,(colSums(is.na(trainingFile)) == 0)]
+idX <- grep("^X$|user_name|timestamp|window", names(trainingDataSet))
+trainingDataSet <- trainingDataSet[-idX]
+```
+
+Before any further transformations are carried out, the data set is divided into three groups, two for training and one for testing.  These are randomly sampled without replacement from the 19,622 observations, resulting in 6,542 in one group and 6,540 in each of the other two groups [with 53 variables in all three groups].  The groups do not overlap.
+
+```{r z4, echo=FALSE}
+numTotal <- seq_len(nrow(trainingFile))
+split <- floor(nrow(trainingFile)/3)
+trainingDataSet2 <- trainingDataSet[sample(1:nrow(trainingDataSet), replace=FALSE),]
+ensembleDataInd <- c(1:split)
+blenderDataInd <- c((split+1):(split*2+2))
+testingDataInd <- c((split*2+3):19622)
+ensembleData <- trainingDataSet2[ensembleDataInd, ]
+blenderData <- trainingDataSet2[blenderDataInd, ]
+testingData <- trainingDataSet2[testingDataInd, ]
+ensembleData$classe <- as.factor(ensembleData$classe)
+blenderData$classe <- as.factor(blenderData$classe)
+testingData$classe <- as.factor(testingData$classe)
+```
+
+## Initial Benchmarking Models
+
+The first training group is used to benchmark the five models independently using the caret package.  The five models/methods chosen to start are 'gbm' (Generalized Boosted Regression), 'nb' (Naive Bayes), 'rf' (Random Forest), 'rpart' (Recursive Partition and Regression Trees), and 'treebag' (Tree-Based Bagging).  This is done first without any further cleaning, to get a sense of accuracy.  The k-fold cross-validation parameter is set to 7 for all of the models.
+
+```{r z5, echo = FALSE, message=FALSE, include=FALSE, results="hide", verbose=0}
+form1 <- formula("classe ~ .")
+labelName <- "classe"
+predictors <- names(blenderData)[names(blenderData) != labelName]
+fitControl <- trainControl(method = "cv", number = 7, returnResamp = "none")
+suppressMessages(modelGBM1 <- train(form1, data=blenderData, method="gbm", trControl = fitControl))
+invisible(suppressWarnings(modelNB1 <- train(form1, data=blenderData, method="nb", trControl = fitControl)))
+modelRF1 <- train(form1, data=blenderData, method="rf", trControl = fitControl)
+modelRPART1 <- train(form1, data=blenderData, method="rpart", trControl = fitControl)
+modelTB1 <- train(form1, data=blenderData, method="treebag", trControl = fitControl)
+predGBM1 <- predict(modelGBM1, ensembleData)
+coMaGBM1 <- confusionMatrix(predGBM1, reference = ensembleData$classe)
+suppressWarnings(predNB1 <- predict(modelNB1, ensembleData))
+coMaNB1 <- confusionMatrix(predNB1, reference = ensembleData$classe)
+predRF1 <- predict(modelRF1, ensembleData)
+coMaRF1 <- confusionMatrix(predRF1, reference = ensembleData$classe)
+predRPART1 <- predict(modelRPART1, ensembleData)
+coMaRPART1 <- confusionMatrix(predRPART1, reference = ensembleData$classe)
+predTB1 <- predict(modelTB1, ensembleData)
+coMaTB1 <- confusionMatrix(predTB1, reference = ensembleData$classe)
+```
+```{r z5a, eval=TRUE, echo=FALSE}
+coMaGBM1$overall["Accuracy"]
+coMaNB1$overall["Accuracy"]
+coMaRF1$overall["Accuracy"]
+coMaRPART1$overall["Accuracy"]
+coMaTB1$overall["Accuracy"]
+```
+
+The resulting models mostly show high accuracy, in the following order: rf(98.98%), tb(98.75%), gbm (96.56%), nb(72.91%), and rpart(49.04%).  The Naive Bayes model returns many "0 probability" warnings which are suppressed.  The rpart model has low accuracy, but can still be included; the accuracy of a random pick would only be 20% (A, B, C, D, or E), so it seems it has something going for it.
+
+The models all seem acceptable, and able to tolerate any differences between subjects and time periods etc.  The Random Forest model is already achieving 98.98% accuracy, but it is possible this can be increased by creating an ensemble model.  To do this, the second training group is going to be used with the same five kinds of models.  These models will make predictions about the other groups (the first training group and the testing group).  Eventually, the modified first group containing the predictors will be used to make a final model for the test data.
+
+## Ensemble/ Blended Model
+
+Unlike the first time above, this second group is checked for variables with zero or very low variance as well as correlated variables.  The former are not useful to the models, because they exhibit little change.  They are removed from both training groups.  Checking for correlations shows some, but it seems tolerable.
+
+As shown in the histogram of uniqueness, there is a large proportion of variables at the lower end which exhibit a low amount of uniqueness.  These are not very useful for prediction.  So this results in the removal of a further 28 variables (cutoff < 10% uniqueness).
+
+```{r z6, echo=FALSE, eval=TRUE}
+nzv <- nearZeroVar(ensembleData, saveMetrics = TRUE)
+hist(nzv$percentUnique, breaks=35, main = "Uniqueness of Variables", xlab = "Percent Unique")
+zap <- order(nzv$percentUnique)[1:28]
+ensembleDataNoZV <- ensembleData[, -zap]
+ensembleDataNoZV$classe <- ensembleData$classe
+## same process for the other training group
+nzv <- nearZeroVar(blenderData, saveMetrics = TRUE)
+zap <- order(nzv$percentUnique)[1:28]
+blenderDataNoZV <- blenderData[, -zap]
+## check for correlations
+descrCor <- cor(blenderDataNoZV)
+blenderDataNoZV$classe <- blenderData$classe
+hist(descrCor[upper.tri(descrCor)], breaks=39, main = "Correlations Between Remaining Variables", xlab = "Correlation")
+summary(descrCor[upper.tri(descrCor)])
+```
+
+The histogram of correlations is shown above, but is insignificant and resulted in no further transformations or removals.
+
+This leaves 25 variables other than the classifier, compared to the original 160.  The remaining data in this group is next pre-processed by centering and scaling before training new models.
+
+```{r z7, echo=FALSE, eval=TRUE, results = "hide"}
+modelGB2 <- train(form1, data=ensembleDataNoZV, preProcess = c("center", "scale"), method = "gbm", trControl = fitControl)
+suppressWarnings(modelNB2 <- train(form1, data=ensembleDataNoZV, preProcess = c("center", "scale"), method = "nb", trControl = fitControl))
+modelRF2 <- train(form1, data=ensembleDataNoZV, preProcess = c("center", "scale"), method = "rf", trControl = fitControl)
+modelRPART2 <- train(form1, data=ensembleDataNoZV, preProcess = c("center", "scale"), method = "rpart", trControl = fitControl)
+modelTB2 <- train(form1, data=ensembleDataNoZV, preProcess = c("center", "scale"), method = "treebag", trControl = fitControl)
+```
+
+This generates five new models designed to predict the classifiers for all of the ~6500 rows in the other two groups as well as the final test group for grading.  The predictions are copied into five new variables in their respective groups for the ensemble model to use.
+
+```{r z8, echo=FALSE}
+blenderDataNoZV$gbm_PROB <- predict(object=modelGB2, blenderData[,predictors])
+suppressWarnings(blenderDataNoZV$nb_PROB <- predict(object=modelNB2, blenderData[,predictors]))
+blenderDataNoZV$rf_PROB <- predict(object=modelRF2, blenderData[,predictors])
+blenderDataNoZV$rpart_PROB <- predict(object=modelRPART2, blenderData[,predictors])
+blenderDataNoZV$treebag_PROB <- predict(object=modelTB2, blenderData[,predictors])
+## same process for testing group
+testingData$gbm_PROB <- predict(object=modelGB2, testingData[,predictors])
+suppressWarnings(testingData$nb_PROB <- predict(object=modelNB2, testingData[,predictors]))
+testingData$rf_PROB <- predict(object=modelRF2, testingData[,predictors])
+testingData$rpart_PROB <- predict(object=modelRPART2, testingData[,predictors])
+testingData$treebag_PROB <- predict(object=modelTB2, testingData[,predictors])
+```
+
+The caret package is used again to train the newly amended training group with Random Forest as the method, based on its superior performance earlier. This produces an ensemble model, with the other models' predictions now part of the data.  (The pre-process argument is used to center and scale this training group.)
+
+```{r z9, echo=TRUE}
+suppressWarnings(finalModel <- train(form1, data = blenderDataNoZV, method='rf', importance = TRUE, preProcess = c("center", "scale"), trControl=fitControl))
+```
+
+This model is then applied to the testing group which has the five predictions incorporated from the previous step.  And the accuracy is checked.
+
+```{r z10, echo=TRUE, eval=TRUE}
+predictors <- names(testingData)[names(testingData) != labelName]
+predFinal <- predict(object=finalModel, testingData[,predictors])
+coMaFinal <- confusionMatrix(predFinal, reference = testingData$classe)
+coMaFinal$overall["Accuracy"]
+```
+
+## Conclusions and Discussion
+
+The accuracy has been decreased to 98.96%, from 98.98% using Random Forest alone -- while the practical impact seems small in this case, there are other applications such as medical diagnostics where that may affect patients in a population.
+
+Some warnings were returned regarding the rpart predictions.  Upon further inspection, it was found that the rpart model has no predictions for the "D" classifier (the only one like that).  To make sure the rpart model is not dragging the accuracy down, the column with the rpart prediction is now removed from the training and testing groups and the ensemble model is trained and tested again.
+
+```{r z11, echo=TRUE, eval=TRUE}
+blenderDataNoZV$rpart_PROB <- NULL
+testingData$rpart_PROB <- NULL
+finalModel2 <- train(form1, data = blenderDataNoZV, method='rf', preProcess = c("center", "scale"), trControl=fitControl)
+predictors <- names(testingData)[names(testingData) != labelName]
+predFinal2 <- predict(object=finalModel2, testingData[,predictors])
+coMaFinal2 <- confusionMatrix(predFinal2, reference = testingData$classe)
+coMaFinal2$overall["Accuracy"]
+```
+
+With the rpart component removed, the accuracy of the ensemble model is reduced to 98.79% from 98.96%.  So the rpart model seems to be helping.  It is possible that  running these models with slightly adjusted arguments could increase the accuracy.
+
+```{r z11a, echo=FALSE, eval = TRUE}
+varImpPlot(finalModel$finalModel, sort = TRUE, type = 1, pch = 19, col = 1, cex = 0.65, main = "Importance of Individual Principal Components")
+```
+
+The plot above shows the ranked importance of the principal components.  With the prediction variables included, the Random Forest, GBM, and Treebag predictions are the most significant due to their accuracy.  In terms of the accelerometers, the most important are roll_belt, yaw_belt, gyros_forearm_y, magnet_forearm_z, pitch_dumbbell, and pitch_forearm.
+
+The next step is to apply the model(s) to the test/ quiz data.  Based on the previous results, the expected out-of-sample error is around 1.02% - 1.04%.
+
+```{r z12, echo=FALSE, eval=TRUE}
+testingFinalGrp <- read.csv("pml-testing.csv", na.strings = c("NA","",'#DIV/0!'), stringsAsFactors = FALSE)
+predictors <- names(testingFinalGrp)[names(testingFinalGrp) != labelName]
+testingFinalGrp$gbm_PROB <- predict(object=modelGB2, testingFinalGrp[,predictors])
+suppressWarnings(testingFinalGrp$nb_PROB <- predict(object=modelNB2, testingFinalGrp[,predictors]))
+testingFinalGrp$rf_PROB <- predict(object=modelRF2, testingFinalGrp[,predictors])
+testingFinalGrp$rpart_PROB <- predict(object=modelRPART2, testingFinalGrp[,predictors])
+testingFinalGrp$treebag_PROB <- predict(object=modelTB2, testingFinalGrp[,predictors])
+predictors <- names(testingFinalGrp)[names(testingFinalGrp) != labelName]
+predFinalFinal <- predict(object=finalModel, testingFinalGrp[,predictors])
+predFinalFinal
+```
+
+The output shows the predictions for the 20 rows in the test/ quiz data.
+
+## References
+
+*** The following are the original source and article with the Weight Lifting Exercise Dataset:
+
+http://groupware.les.inf.puc-rio.br/har
+
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6
+
